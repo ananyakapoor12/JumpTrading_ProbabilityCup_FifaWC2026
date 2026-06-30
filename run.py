@@ -35,7 +35,7 @@ from data_fetcher  import fetch_all, print_upcoming, compute_model_accuracy
 from pipeline_v2   import (fit_strengths, compute_anchored_lambdas, score_matrix,
                             derive_all_markets, pois,
                             remove_vig, SHOT_SHARES, MODEL_WEIGHT, MARKET_WEIGHT,
-                            classify)
+                            classify, resolve_prediction)
 from api_client    import KapbotClient
 import math
 
@@ -128,12 +128,13 @@ def run_full_pipeline(home_team, away_team,
 
     def fp(model_key, mkt_p=None):
         mp = mkts.get(model_key, 0.5)
-        return to_int(MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p if mkt_p else mp)
+        return MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p if mkt_p else mp
 
     predictions = {
         "home_win":               fp("home_win",  fair_3way["home"] if fair_3way else None),
         "away_win":               fp("away_win",  fair_3way["away"] if fair_3way else None),
         "home_lead_ht":           fp("home_lead_ht"),
+        "away_lead_ht":           fp("away_lead_ht"),
         "home_scores_first":      fp("home_scores_first"),
         "over_2_5":               fp("over_2_5",  fair_ou["over"] if fair_ou else None),
         "btts":                   fp("btts"),
@@ -155,10 +156,10 @@ def run_full_pipeline(home_team, away_team,
         share = d["share"]
         p_g   = player_goal_p(lam, share)
         p_a   = p_g * 0.65
-        predictions[f"{player}_goal"]           = to_int(p_g)
-        predictions[f"{player}_goal_or_assist"] = to_int(p_g + p_a - p_g * p_a)
-        predictions[f"{player}_1plus_sot"]      = to_int(player_sot_p(lam, share, 1))
-        predictions[f"{player}_2plus_sot"]      = to_int(player_sot_p(lam, share, 2))
+        predictions[f"{player}_goal"]           = p_g
+        predictions[f"{player}_goal_or_assist"] = p_g + p_a - p_g * p_a
+        predictions[f"{player}_1plus_sot"]      = player_sot_p(lam, share, 1)
+        predictions[f"{player}_2plus_sot"]      = player_sot_p(lam, share, 2)
 
     # ── 6. Review dashboard ────────────────────────────────────────
     print(f"\n[6/6] Review dashboard:\n")
@@ -197,6 +198,7 @@ def run_full_pipeline(home_team, away_team,
             for i, (q, k) in enumerate(q_templates)
         ]
 
+    lambdas = mkts.get("_lambdas", {})
     submission_list = []
     for i, mkt in enumerate(markets, 1):
         q     = mkt["question"]
@@ -206,25 +208,17 @@ def run_full_pipeline(home_team, away_team,
         if not key and "_key" in mkt:
             key = mkt["_key"]
 
-        p_int = None
-        if key in predictions:
-            p_int = predictions[key]
-        elif pd:
-            name = pd.get("name", "")
-            ptype = pd.get("type", "")
-            thr   = pd.get("thr", 2)
-            if "goal_or_assist" in (key or ""):
-                p_int = predictions.get(f"{name}_goal_or_assist")
-            elif "goal" in (key or "") or ptype == "anytime_goal":
-                p_int = predictions.get(f"{name}_goal")
-            elif "sot" in (key or ""):
-                p_int = predictions.get(f"{name}_{thr}plus_sot")
-
-        p_int = p_int or 50
+        prob  = resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a)
+        p_int = max(1, min(99, round(prob * 100))) if prob is not None else 50
         flag  = "" if key else " (?)"
 
-        model_pct = f"{mkts.get(key,0)*100:.0f}%" if key and key in mkts else "  —"
-        mkt_pct   = "—"
+        if key in mkts:
+            model_pct = f"{mkts[key]*100:.0f}%"
+        elif prob is not None:
+            model_pct = f"{prob*100:.0f}%"
+        else:
+            model_pct = "  —"
+        mkt_pct = "—"
         if key == "home_win" and fair_3way:  mkt_pct = f"{fair_3way['home']*100:.0f}%"
         if key == "over_2_5" and fair_ou:    mkt_pct = f"{fair_ou['over']*100:.0f}%"
 

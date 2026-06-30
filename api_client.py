@@ -13,6 +13,18 @@ import requests
 BASE_URL = "https://api.sportspredict.com/api/v1"
 
 
+# FIFA 3-letter codes that differ from the first 3 letters of the English name.
+_FIFA_CODES = {
+    "Netherlands": "NED", "Morocco": "MAR", "Ivory Coast": "CIV",
+    "South Korea": "KOR", "DR Congo": "COD", "Saudi Arabia": "KSA",
+    "Czech Republic": "CZE", "Czechia": "CZE", "Cape Verde": "CPV",
+    "Bosnia": "BIH", "Bosnia and Herzegovina": "BIH",
+    "Algeria": "ALG", "Austria": "AUT", "Croatia": "CRO",
+    "Switzerland": "SUI", "Australia": "AUS", "Senegal": "SEN",
+    "Ghana": "GHA", "Colombia": "COL", "Ecuador": "ECU",
+}
+
+
 class KapbotClient:
     def __init__(self, api_key: str):
         self._session = requests.Session()
@@ -117,12 +129,14 @@ class KapbotClient:
 
     def find_match(self, home_team: str) -> dict | None:
         """
-        Find a match dict by home team name. Tries exact then 3-letter prefix.
+        Find a match dict by home team name.
+        Tries: exact name → FIFA 3-letter code → first-3-letter prefix.
         Returns None if no open match is found.
         """
+        code = _FIFA_CODES.get(home_team, home_team[:3]).upper()
         for m in self.get_matches():
             name = m.get("name", "")
-            if home_team in name or home_team[:3].upper() in name.upper():
+            if home_team in name or code in name.upper():
                 return m
         return None
 
