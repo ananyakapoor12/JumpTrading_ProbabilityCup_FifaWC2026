@@ -74,7 +74,7 @@ from state_manager  import (load_state, save_state, already_submitted,
                              set_override, print_status, match_key)
 from pipeline_v2    import (fit_strengths, compute_anchored_lambdas, score_matrix,
                              derive_all_markets, remove_vig, SHOT_SHARES,
-                             MODEL_WEIGHT, MARKET_WEIGHT, classify, pois)
+                             MODEL_WEIGHT, MARKET_WEIGHT, classify, resolve_prediction, pois)
 from api_client     import KapbotClient
 
 # ─── Configuration ────────────────────────────────────────────────
@@ -334,27 +334,15 @@ def predict_and_submit(home_team, away_team, state,
     print(f"\n  {'#':<4}{'Question':<48}{'P':>4}")
     print(f"  {'─'*56}")
 
+    lambdas = mkts.get("_lambdas", {})
     for i, mkt in enumerate(markets, 1):
         q       = mkt["question"]
         key, pd = classify(q, home_team, away_team)
         if not key and "_key" in mkt:
             key = mkt["_key"]
 
-        p_int = None
-        if key in predictions:
-            p_int = predictions[key]
-        elif pd:
-            name  = pd.get("name", "")
-            ptype = pd.get("type", "")
-            thr   = pd.get("thr", 2)
-            if "goal_or_assist" in (key or ""):
-                p_int = predictions.get(f"{name}_goal_or_assist")
-            elif "goal" in (key or "") or ptype == "anytime_goal":
-                p_int = predictions.get(f"{name}_goal")
-            elif "sot" in (key or ""):
-                p_int = predictions.get(f"{name}_{thr}plus_sot")
-
-        p_int = p_int or 50
+        prob  = resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a)
+        p_int = max(1, min(99, round(prob * 100))) if prob is not None else 50
         dq    = (q[:47] + "…") if len(q) > 47 else q
         print(f"  {i:<4}{dq:<48}{p_int:>3}")
 

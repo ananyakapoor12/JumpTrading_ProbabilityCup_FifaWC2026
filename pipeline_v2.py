@@ -37,7 +37,7 @@ Market anchoring: Solve for λ_total such that P(over 2.5 | λ) = market probabi
 Blending:        final = 0.4 × model + 0.6 × market   (where market exists)
 """
 
-import math, json, os, sys, argparse
+import math, json, os, re, sys, argparse
 import numpy as np
 from scipy.optimize import minimize
 from api_client import KapbotClient
@@ -117,21 +117,34 @@ def derive_all_markets(m, lam_h, lam_a):
     # Goal before hydration break (~30 min)
     r["goal_before_break"] = 1 - math.exp(-(lam_h + lam_a) * (30/90))
 
-    # Home 7+ shots on target  (conversion rate ≈ 0.33 goals/SOT)
+    # Shots on target — conversion rate ≈ 0.33 goals/SOT
     lam_sot_h = lam_h / 0.33
+    lam_sot_a = lam_a / 0.33
     r["home_7plus_sot"] = 1 - sum(pois(lam_sot_h, k) for k in range(7))
 
-    # Home 7+ corners — scales with territorial dominance
+    # Corners — scale with territorial dominance
     dominance     = lam_h / (lam_h + lam_a)
     lam_corners_h = max(3.0, min(9.0, 5.0 * dominance / 0.5))
+    lam_corners_a = max(3.0, min(9.0, 5.0 * (1 - dominance) / 0.5))
     r["home_7plus_corners"] = 1 - sum(pois(lam_corners_h, k) for k in range(7))
 
-    # Cards (4+) — knockout game slight uplift
-    r["cards_4plus"]   = 1 - sum(pois(3.8, k) for k in range(4))
+    # Cards — flat baseline
+    lam_cards = 3.8
+    r["cards_4plus"] = 1 - sum(pois(lam_cards, k) for k in range(4))
 
-    # Offsides (3+) — scales with home dominance
+    # Offsides — scales with home territorial dominance
     lam_off = 3.2 * (1 + (dominance - 0.5) * 0.8)
     r["offsides_3plus"] = 1 - sum(pois(lam_off, k) for k in range(3))
+
+    # Expose rate parameters so callers can price arbitrary thresholds
+    r["_lambdas"] = {
+        "home_sot":     lam_sot_h,
+        "away_sot":     lam_sot_a,
+        "home_corners": lam_corners_h,
+        "away_corners": lam_corners_a,
+        "cards":        lam_cards,
+        "offsides":     lam_off,
+    }
 
     return r
 
@@ -143,6 +156,19 @@ def player_sot_p(lam_team, shot_share, threshold=2, sot_rate=0.33):
     """P(player has ≥ threshold SOT)."""
     lam_sot = (lam_team / sot_rate) * shot_share
     return 1 - sum(pois(lam_sot, k) for k in range(threshold))
+
+def red_card_p(lam_cards, base_rate=0.18):
+    """
+    P(at least one red card shown).
+    Scales a ~0.18 reds/match baseline by the match's overall card volume.
+    """
+    lam_red = base_rate * (lam_cards / 3.8)
+    return 1 - math.exp(-lam_red)
+
+def stoppage_time_goal_p(lam_h, lam_a, added_minutes=4):
+    """P(a goal is scored in first-half stoppage/added time)."""
+    match_minutes = 90 + added_minutes
+    return 1 - math.exp(-(lam_h + lam_a) * (added_minutes / match_minutes))
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -358,44 +384,104 @@ SHOT_SHARES = {
 # ─────────────────────────────────────────────────────────────────
 
 def classify(question, home, away):
-    """Map a SportsPredict question string to a model output key."""
+    """Map a SportsPredict question string to a model output key + params."""
     q, h, a = question.lower(), home.lower(), away.lower()
+
+    # Fixed-shape markets
     mapping = {
-        (f"will {h} win",       "regulation"):  "home_win",
-        (f"will {a} win",       "regulation"):  "away_win",
-        ("ahead at halftime",   h):             "home_lead_ht",
-        ("score the first goal",h):             "home_scores_first",
-        ("3 or more total goals",  ""):         "over_2_5",
-        ("both teams score",       ""):         "btts",
-        ("score in both halves",   h):          "home_scores_both_halves",
-        ("goal be scored before",  ""):         "goal_before_break",
-        (f"will {h} have 7 or more shots", ""): "home_7plus_sot",
-        (f"will {h} have 7 or more corner",""):  "home_7plus_corners",
-        ("4 or more total cards",  ""):         "cards_4plus",
-        ("3 or more offside",      ""):         "offsides_3plus",
+        (f"will {h} win",        "regulation"): "home_win",
+        (f"will {a} win",        "regulation"): "away_win",
+        ("ahead at halftime",    h):            "home_lead_ht",
+        ("score the first goal", h):            "home_scores_first",
+        ("both teams score",     ""):           "btts",
+        ("score in both halves", h):            "home_scores_both_halves",
+        ("goal be scored before","hydration"):  "goal_before_break",
+        ("stoppage",             ""):           "stoppage_time_goal",
+        ("red card",             ""):           "red_card",
     }
     for (kw1, kw2), key in mapping.items():
         if kw1 in q and (not kw2 or kw2 in q):
             return key, None
 
-    # Player props
+    # Total goals with arbitrary threshold — N=3 keeps market-blend logic
+    m = re.search(r"(\d+)\s+or more total goals", q)
+    if m:
+        thr = int(m.group(1))
+        return ("over_2_5", None) if thr == 3 else ("total_goals_threshold", {"thr": thr})
+
+    # Counting stats: "N or more <category>" — team-level or player SOT
+    m = re.search(r"(\d+)\s+or more\s+(shots on target|corner kicks?|total cards|offside)", q)
+    if m:
+        thr, stat = int(m.group(1)), m.group(2)
+        # Player SOT props include "(Team)" parens; team-level questions don't
+        if "shots on target" in stat and "(" in question:
+            name = question.split("(")[0].replace("Will ", "").strip()
+            team = "home" if h in q else "away"
+            return f"player_{thr}plus_sot", {"name": name, "team": team, "thr": thr}
+        if "shots on target" in stat:
+            cat = "home_sot" if h in q else "away_sot"
+        elif "corner" in stat:
+            cat = "home_corners" if h in q else "away_corners"
+        elif "card" in stat:
+            cat = "cards"
+        else:
+            cat = "offsides"
+        return "threshold", {"category": cat, "thr": thr}
+
+    # Player goal / assist props
     if "score a goal" in q and "excluding own goals" in q:
-        name = question.split("(")[0].replace("Will ","").strip()
+        name = question.split("(")[0].replace("Will ", "").strip()
         team = "home" if h in q else "away"
-        return "player_goal", {"name":name,"team":team}
+        return "player_goal", {"name": name, "team": team}
 
     if "score or assist" in q:
-        name = question.split("(")[0].replace("Will ","").strip()
+        name = question.split("(")[0].replace("Will ", "").strip()
         team = "home" if h in q else "away"
-        return "player_goal_or_assist", {"name":name,"team":team}
-
-    if "shots on target" in q:
-        name = question.split("(")[0].replace("Will ","").strip()
-        team = "home" if h in q else "away"
-        thr  = 2 if "2 or more" in q else 1
-        return f"player_{thr}plus_sot", {"name":name,"team":team,"thr":thr}
+        return "player_goal_or_assist", {"name": name, "team": team}
 
     return None, None
+
+
+def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
+    """
+    Convert a classify() result to a probability in [0, 1], or None.
+
+    Shared by pipeline_v2.run(), run.run_full_pipeline(), and
+    scheduler.predict_and_submit() so all three price markets identically.
+    """
+    # Direct lookup in pre-built predictions dict (covers all canonical markets
+    # and player props pre-computed at the top of each pipeline)
+    if key in predictions:
+        return predictions[key]
+
+    # Threshold-flexible counting stats (corners/cards/offsides/SOT)
+    if key == "threshold" and pd:
+        lam = lambdas.get(pd["category"])
+        if lam is not None:
+            return 1 - sum(pois(lam, k) for k in range(pd["thr"]))
+
+    # Total goals at a non-standard threshold (e.g. over 3.5 = "4 or more")
+    if key == "total_goals_threshold" and pd:
+        return 1 - sum(pois(lam_h + lam_a, k) for k in range(pd["thr"]))
+
+    if key == "red_card":
+        return red_card_p(lambdas.get("cards", 3.8))
+
+    if key == "stoppage_time_goal":
+        return stoppage_time_goal_p(lam_h, lam_a)
+
+    # Player props resolved by name from predictions dict
+    if pd:
+        name = pd.get("name", "")
+        thr  = pd.get("thr", 2)
+        if "goal_or_assist" in (key or ""):
+            return predictions.get(f"{name}_goal_or_assist")
+        if "goal" in (key or ""):
+            return predictions.get(f"{name}_goal")
+        if "sot" in (key or ""):
+            return predictions.get(f"{name}_{thr}plus_sot")
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -551,30 +637,23 @@ def run(home_team, away_team,
             ])
         ]
 
+    lambdas = mkts.get("_lambdas", {})
     submission_list = []
     for i, mkt in enumerate(markets, 1):
         q       = mkt["question"]
         key, pd = classify(q, home_team, away_team)
-        p_int   = None
-
-        if key and key in predictions:
-            p_int = predictions[key]
-        elif pd:
-            name = pd.get("name","")
-            if "goal_or_assist" in (key or ""):
-                p_int = predictions.get(f"{name}_goal_or_assist")
-            elif "goal" in (key or ""):
-                p_int = predictions.get(f"{name}_goal")
-            elif "sot" in (key or ""):
-                thr   = pd.get("thr", 1)
-                p_int = predictions.get(f"{name}_{thr}plus_sot")
-
-        p_int = p_int or 50
-        flag  = "" if key else " (?)"
+        prob    = resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a)
+        p_int   = to_platform_int(prob) if prob is not None else 50
+        flag    = "" if key else " (?)"
 
         # Model and market % for display
-        model_pct = f"{mkts.get(key,0.5)*100:.0f}%" if key and key in mkts else "  —"
-        mkt_pct   = "—"
+        if key in mkts:
+            model_pct = f"{mkts[key]*100:.0f}%"
+        elif prob is not None:
+            model_pct = f"{prob*100:.0f}%"
+        else:
+            model_pct = "  —"
+        mkt_pct = "—"
         if key == "home_win"  and fair_3way: mkt_pct = f"{fair_3way['home']*100:.0f}%"
         elif key == "over_2_5" and fair_ou:  mkt_pct = f"{fair_ou['over']*100:.0f}%"
 
