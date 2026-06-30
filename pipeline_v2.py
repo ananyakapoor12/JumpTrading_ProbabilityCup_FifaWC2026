@@ -111,6 +111,7 @@ def derive_all_markets(m, lam_h, lam_a):
     total_r = lam_h + lam_a
     p_any   = 1 - math.exp(-total_r)
     r["home_scores_first"] = (lam_h / total_r) * p_any + 0.5 * (1 - p_any)
+    r["away_scores_first"] = (lam_a / total_r) * p_any + 0.5 * (1 - p_any)
 
     # Home scores in both halves
     r["home_scores_both_halves"] = (1 - math.exp(-lh_ht)) * (1 - math.exp(-lam_h * 0.55))
@@ -170,6 +171,45 @@ def stoppage_time_goal_p(lam_h, lam_a, added_minutes=4):
     """P(a goal is scored in first-half stoppage/added time)."""
     match_minutes = 90 + added_minutes
     return 1 - math.exp(-(lam_h + lam_a) * (added_minutes / match_minutes))
+
+def goal_in_window_p(lam_h, lam_a, minutes):
+    """P(≥1 goal in a time window of `minutes` out of 90)."""
+    return 1 - math.exp(-(lam_h + lam_a) * minutes / 90)
+
+def first_half_over_p(lam_h, lam_a, thr):
+    """P(≥thr goals in first half). First half carries ~45% of total xG."""
+    lam_ht = (lam_h + lam_a) * 0.45
+    return 1 - sum(pois(lam_ht, k) for k in range(thr))
+
+def more_goals_2h_vs_1h_p(lam_h, lam_a):
+    """P(goals in 2nd half > goals in 1st half)."""
+    lam_1h = (lam_h + lam_a) * 0.45
+    lam_2h = (lam_h + lam_a) * 0.55
+    total, max_g = 0.0, 9
+    for g2 in range(1, max_g + 1):
+        for g1 in range(0, g2):
+            total += pois(lam_2h, g2) * pois(lam_1h, g1)
+    return total
+
+def corner_dominance_p(lam_h, lam_a):
+    """P(home team gets more corners). Corner rate ∝ team attack share."""
+    MEAN_CORNERS = 10.5
+    lam_h_c = MEAN_CORNERS * lam_h / (lam_h + lam_a)
+    lam_a_c = MEAN_CORNERS * lam_a / (lam_h + lam_a)
+    total, max_c = 0.0, 20
+    for ch in range(1, max_c + 1):
+        for ca in range(0, ch):
+            total += pois(lam_h_c, ch) * pois(lam_a_c, ca)
+    return total
+
+def card_in_window_p(lam_cards, fraction, late_bias=1.3):
+    """P(≥1 card in time-window fraction of match). 1.3 = late-game bias."""
+    return 1 - math.exp(-lam_cards * fraction * late_bias)
+
+def both_teams_carded_p(lam_cards):
+    """P(both home and away receive ≥1 card). Each team ≈ λ_cards/2."""
+    p_each = 1 - math.exp(-lam_cards / 2)
+    return p_each * p_each
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -407,16 +447,17 @@ def classify(question, home, away):
             if paren and paren.group(1).lower() in (h, a):
                 nm = re.match(r'Will\s+(.+?)\s+have\s+\d+', question, re.I)
                 name = nm.group(1) if nm else question.split("(")[0].replace("Will ", "").strip()
+                name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
                 team = "home" if h in q else "away"
                 return f"player_{thr}plus_sot", {"name": name, "team": team, "thr": thr}
             # Check if subject is a player name (not the team name itself)
             subject_m = re.match(r'will\s+(?:the\s+)?(.+?)\s+have\s+\d+', q)
             subject = subject_m.group(1) if subject_m else ""
             if subject and subject not in (h, a, f"the {h}", f"the {a}"):
-                # Player prop: team name doesn't appear in question — treat as unknown player
                 nm = re.match(r'Will\s+(.+?)\s+have\s+\d+', question, re.I)
                 name = nm.group(1) if nm else subject
-                team = "home"  # fallback; resolve_prediction will use predictions dict by name
+                name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
+                team = "home" if h in q else "away"
                 return f"player_{thr}plus_sot", {"name": name, "team": team, "thr": thr}
             cat = "home_sot" if h in q or f"the {h}" in q else "away_sot"
         elif "corner" in stat:
@@ -428,19 +469,51 @@ def classify(question, home, away):
         return "threshold", {"category": cat, "thr": thr}
 
     # Player goal / assist props
-    # "Will PlayerName score a goal (excluding own goals)..."
+    # "Will PlayerName (TeamName) score a goal (excluding own goals)..."
     if "score a goal" in q and "excluding own goals" in q:
         nm = re.match(r'Will\s+(.+?)\s+score a goal', question, re.I)
         name = nm.group(1) if nm else question.split("(")[0].replace("Will ", "").strip()
+        name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
         team = "home" if h in q else "away"
         return "player_goal", {"name": name, "team": team}
 
-    # "Will PlayerName score or assist a goal..."
+    # "Will PlayerName (TeamName) score or assist a goal..."
     if "score or assist" in q:
         nm = re.match(r'Will\s+(.+?)\s+score or assist', question, re.I)
         name = nm.group(1) if nm else question.split("(")[0].replace("Will ", "").strip()
+        name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
         team = "home" if h in q else "away"
         return "player_goal_or_assist", {"name": name, "team": team}
+
+    # ── Second hydration break events (≈76' onward) ──
+    if "after the second hydration break" in q and "goal" in q:
+        return "goal_after_2nd_hydration", None
+    if "after the second hydration break" in q and "card" in q:
+        return "card_after_2nd_hydration", None
+
+    # ── Second half vs first half (must come before first-half stoppage check) ──
+    if "second half produce more goals than the first half" in q:
+        return "more_goals_2h_vs_1h", None
+
+    # ── First half specific goals ──
+    if "first-half stoppage time" in q and "goal" in q:
+        return "stoppage_time_goal", None
+    m = re.search(r"first half produce (\d+) or more goals", q)
+    if m:
+        return "first_half_over", {"thr": int(m.group(1))}
+
+    # ── Penalty ──
+    if "penalty kick be awarded" in q:
+        return "penalty", None
+
+    # ── Corner dominance ──
+    if "more corner kicks than" in q:
+        home_more = h in q.split("more corner kicks than")[0]
+        return "corner_dominance", {"home": home_more}
+
+    # ── Both teams carded ──
+    if "both teams receive at least one card" in q:
+        return "both_teams_carded", None
 
     # ── Fixed-shape markets (checked after numeric patterns) ──
     mapping = {
@@ -451,6 +524,7 @@ def classify(question, home, away):
         ("ahead at halftime",    h):            "home_lead_ht",
         ("ahead at halftime",    a):            "away_lead_ht",
         ("score the first goal", h):            "home_scores_first",
+        ("score the first goal", a):            "away_scores_first",
         (f"will the {h} score the first", ""):  "home_scores_first",
         ("both teams score",     ""):           "btts",
         ("score in both halves", h):            "home_scores_both_halves",
@@ -494,6 +568,28 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
 
     if key == "stoppage_time_goal":
         return stoppage_time_goal_p(lam_h, lam_a)
+
+    if key == "penalty":
+        return 0.28  # ~0.28 penalties/match in WC knockout games
+
+    if key == "goal_after_2nd_hydration":
+        return goal_in_window_p(lam_h, lam_a, minutes=15)  # ≈76'–90'
+
+    if key == "card_after_2nd_hydration":
+        return card_in_window_p(lambdas.get("cards", 3.5), fraction=20/90)
+
+    if key == "first_half_over" and pd:
+        return first_half_over_p(lam_h, lam_a, pd["thr"])
+
+    if key == "more_goals_2h_vs_1h":
+        return more_goals_2h_vs_1h_p(lam_h, lam_a)
+
+    if key == "corner_dominance" and pd:
+        p = corner_dominance_p(lam_h, lam_a)
+        return p if pd["home"] else 1 - p
+
+    if key == "both_teams_carded":
+        return both_teams_carded_p(lambdas.get("cards", 3.5))
 
     # Player props resolved by name from predictions dict
     if pd:
@@ -600,6 +696,7 @@ def run(home_team, away_team,
         "away_win":              final_p("away_win", fair_3way["away"] if fair_3way else None),
         "home_lead_ht":          final_p("home_lead_ht"),
         "home_scores_first":     final_p("home_scores_first"),
+        "away_scores_first":     final_p("away_scores_first"),
         "over_2_5":              final_p("over_2_5", fair_ou["over"] if fair_ou else None),
         "btts":                  final_p("btts"),
         "home_scores_both_halves": final_p("home_scores_both_halves"),
