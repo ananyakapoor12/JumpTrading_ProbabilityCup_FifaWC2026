@@ -75,7 +75,7 @@ $$P(\text{home scores } i) = \frac{e^{-\lambda_H} \cdot \lambda_H^i}{i!}, \quad 
 
 The full score matrix is an $(N+1) \times (N+1)$ grid (N = 10):
 
-$$M_{ij} = P(\text{home}=i,\, \text{away}=j) = \text{pois}(\lambda_H, i) \cdot \text{pois}(\lambda_A, j)$$
+$$M_{ij} = P(\text{home}=i,\, \text{away}=j) = \operatorname{Pois}(\lambda_H, i) \cdot \operatorname{Pois}(\lambda_A, j)$$
 
 All market probabilities are sums over subsets of this matrix.
 
@@ -105,9 +105,9 @@ Each team $k$ has two latent parameters: **attack** $\alpha_k$ and **defence** $
 
 **Expected goals for a single match** (home team $h$, away team $a$):
 
-$$\lambda_H^{(model)} = \text{BASE\_RATE} \cdot \alpha_h \cdot \delta_a \cdot \text{HOME\_ADV} \cdot \text{KO\_ADJ}$$
+$$\lambda_H^{(model)} = \texttt{BASE\_RATE} \cdot \alpha_h \cdot \delta_a \cdot \texttt{HOME\_ADV} \cdot \texttt{KO\_ADJ}$$
 
-$$\lambda_A^{(model)} = \text{BASE\_RATE} \cdot \alpha_a \cdot \delta_h$$
+$$\lambda_A^{(model)} = \texttt{BASE\_RATE} \cdot \alpha_a \cdot \delta_h$$
 
 **Constants:** `BASE_RATE = 1.25`, `HOME_ADV = 1.10` (suppressed at neutral venues), `KO_ADJ = 0.92` (knockout games are tighter).
 
@@ -199,7 +199,7 @@ $$P(\text{away win}) = \sum_{i < j} M_{ij}$$
 
 **Over/Under N.5 goals:**
 
-$$P(\text{over } N\text{.5}) = 1 - \sum_{k=0}^{N} \text{pois}(\lambda_H + \lambda_A,\, k)$$
+$$P(\text{over } N\text{.5}) = 1 - \sum_{k=0}^{N} \operatorname{Pois}(\lambda_H + \lambda_A,\, k)$$
 
 This uses the total lambda directly, valid since sum of independent Poissons is Poisson.
 
@@ -227,7 +227,7 @@ $$P = P(g_H^{1H} \geq 1) \cdot P(g_H^{2H} \geq 1) = (1 - e^{-\lambda_H^{HT}})(1 
 
 $$P(G_{2H} > G_{1H}), \quad G_{1H} \sim \text{Pois}(0.45\lambda_{tot}),\quad G_{2H} \sim \text{Pois}(0.55\lambda_{tot})$$
 
-$$= \sum_{g_2=1}^{N} \sum_{g_1=0}^{g_2-1} \text{pois}(0.55\lambda_{tot}, g_2) \cdot \text{pois}(0.45\lambda_{tot}, g_1)$$
+$$= \sum_{g_2=1}^{N} \sum_{g_1=0}^{g_2-1} \operatorname{Pois}(0.55\lambda_{tot}, g_2) \cdot \operatorname{Pois}(0.45\lambda_{tot}, g_1)$$
 
 ---
 
@@ -263,7 +263,7 @@ where $f = 20/90$ (fraction of match in window), $b = 1.3$ (late-game card rate 
 
 **Team-level counting stats** (shots on target, corners, cards, offsides) use pre-computed lambda values $\lambda_{stat}$ stored in the `_lambdas` dict from `derive_all_markets`:
 
-$$P(\text{team has} \geq N \text{ stat}) = 1 - \sum_{k=0}^{N-1} \text{pois}(\lambda_{stat}, k)$$
+$$P(\text{team has} \geq N \text{ stat}) = 1 - \sum_{k=0}^{N-1} \operatorname{Pois}(\lambda_{stat}, k)$$
 
 **Shots on target lambda:** Derived from goal rate via conversion rate $c = 0.33$:
 
@@ -275,7 +275,7 @@ $$\lambda_{corners}^H = C_{mean} \cdot \frac{\lambda_H}{\lambda_H + \lambda_A}$$
 
 where $C_{mean} = 10.5$ corners/match. For corner dominance markets:
 
-$$P(\text{home more corners}) = \sum_{c_H=1}^{N} \sum_{c_A=0}^{c_H-1} \text{pois}(\lambda_{corners}^H, c_H) \cdot \text{pois}(\lambda_{corners}^A, c_A)$$
+$$P(\text{home more corners}) = \sum_{c_H=1}^{N} \sum_{c_A=0}^{c_H-1} \operatorname{Pois}(\lambda_{corners}^H, c_H) \cdot \operatorname{Pois}(\lambda_{corners}^A, c_A)$$
 
 **Both teams carded** (assuming independence between teams):
 
@@ -297,7 +297,7 @@ The player's expected SOT rate uses team SOT rate $c_{sot} = 0.33$ (goals/SOT):
 
 $$\lambda_{player}^{SOT} = \frac{\lambda_{team}}{c_{sot}} \cdot s$$
 
-$$P(\text{player} \geq n \text{ SOT}) = 1 - \sum_{k=0}^{n-1} \text{pois}(\lambda_{player}^{SOT}, k)$$
+$$P(\text{player} \geq n \text{ SOT}) = 1 - \sum_{k=0}^{n-1} \operatorname{Pois}(\lambda_{player}^{SOT}, k)$$
 
 **Player goal or assist:**
 
@@ -363,7 +363,7 @@ SportsPredict questions are free-text. The `classify(question, home, away)` func
 
 If a player has $g_p$ goals and their team has $G$ total goals in WC2026:
 
-$$s_p = 0.70 \cdot \frac{g_p}{G} + 0.30 \cdot \text{positional\_prior}(p)$$
+$$s_p = 0.70 \cdot \frac{g_p}{G} + 0.30 \cdot \operatorname{positional\_prior}(p)$$
 
 Positional priors: striker = 0.25, attacker = 0.18, attacking mid = 0.14, midfielder = 0.10, winger = 0.12, defender = 0.05.
 
