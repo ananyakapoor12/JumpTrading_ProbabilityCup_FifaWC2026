@@ -105,6 +105,7 @@ def derive_all_markets(m, lam_h, lam_a):
     ht = score_matrix(lh_ht, la_ht)
     r["home_lead_ht"]  = sum(ht[i][j] for i in range(n) for j in range(n) if i > j)
     r["draw_ht"]       = sum(ht[i][j] for i in range(n) for j in range(n) if i == j)
+    r["away_lead_ht"]  = 1 - r["home_lead_ht"] - r["draw_ht"]
 
     # Home scores first — Poisson race property: P(H first) = λH / (λH + λA)
     total_r = lam_h + lam_a
@@ -387,21 +388,7 @@ def classify(question, home, away):
     """Map a SportsPredict question string to a model output key + params."""
     q, h, a = question.lower(), home.lower(), away.lower()
 
-    # Fixed-shape markets
-    mapping = {
-        (f"will {h} win",        "regulation"): "home_win",
-        (f"will {a} win",        "regulation"): "away_win",
-        ("ahead at halftime",    h):            "home_lead_ht",
-        ("score the first goal", h):            "home_scores_first",
-        ("both teams score",     ""):           "btts",
-        ("score in both halves", h):            "home_scores_both_halves",
-        ("goal be scored before","hydration"):  "goal_before_break",
-        ("stoppage",             ""):           "stoppage_time_goal",
-        ("red card",             ""):           "red_card",
-    }
-    for (kw1, kw2), key in mapping.items():
-        if kw1 in q and (not kw2 or kw2 in q):
-            return key, None
+    # ── Specific numeric patterns first (most specific → least specific) ──
 
     # Total goals with arbitrary threshold — N=3 keeps market-blend logic
     m = re.search(r"(\d+)\s+or more total goals", q)
@@ -413,13 +400,25 @@ def classify(question, home, away):
     m = re.search(r"(\d+)\s+or more\s+(shots on target|corner kicks?|total cards|offside)", q)
     if m:
         thr, stat = int(m.group(1)), m.group(2)
-        # Player SOT props include "(Team)" parens; team-level questions don't
-        if "shots on target" in stat and "(" in question:
-            name = question.split("(")[0].replace("Will ", "").strip()
-            team = "home" if h in q else "away"
-            return f"player_{thr}plus_sot", {"name": name, "team": team, "thr": thr}
+        # Player SOT: "Will PlayerName (TeamName) have N+ SOT?" — team name inside parens
+        # Team SOT:   "Will TeamName have N+ SOT in regulation (90 minutes + stoppage time)?"
         if "shots on target" in stat:
-            cat = "home_sot" if h in q else "away_sot"
+            paren = re.search(r'\(([^)]+)\)', question)
+            if paren and paren.group(1).lower() in (h, a):
+                nm = re.match(r'Will\s+(.+?)\s+have\s+\d+', question, re.I)
+                name = nm.group(1) if nm else question.split("(")[0].replace("Will ", "").strip()
+                team = "home" if h in q else "away"
+                return f"player_{thr}plus_sot", {"name": name, "team": team, "thr": thr}
+            # Check if subject is a player name (not the team name itself)
+            subject_m = re.match(r'will\s+(?:the\s+)?(.+?)\s+have\s+\d+', q)
+            subject = subject_m.group(1) if subject_m else ""
+            if subject and subject not in (h, a, f"the {h}", f"the {a}"):
+                # Player prop: team name doesn't appear in question — treat as unknown player
+                nm = re.match(r'Will\s+(.+?)\s+have\s+\d+', question, re.I)
+                name = nm.group(1) if nm else subject
+                team = "home"  # fallback; resolve_prediction will use predictions dict by name
+                return f"player_{thr}plus_sot", {"name": name, "team": team, "thr": thr}
+            cat = "home_sot" if h in q or f"the {h}" in q else "away_sot"
         elif "corner" in stat:
             cat = "home_corners" if h in q else "away_corners"
         elif "card" in stat:
@@ -429,15 +428,41 @@ def classify(question, home, away):
         return "threshold", {"category": cat, "thr": thr}
 
     # Player goal / assist props
+    # "Will PlayerName score a goal (excluding own goals)..."
     if "score a goal" in q and "excluding own goals" in q:
-        name = question.split("(")[0].replace("Will ", "").strip()
+        nm = re.match(r'Will\s+(.+?)\s+score a goal', question, re.I)
+        name = nm.group(1) if nm else question.split("(")[0].replace("Will ", "").strip()
         team = "home" if h in q else "away"
         return "player_goal", {"name": name, "team": team}
 
+    # "Will PlayerName score or assist a goal..."
     if "score or assist" in q:
-        name = question.split("(")[0].replace("Will ", "").strip()
+        nm = re.match(r'Will\s+(.+?)\s+score or assist', question, re.I)
+        name = nm.group(1) if nm else question.split("(")[0].replace("Will ", "").strip()
         team = "home" if h in q else "away"
         return "player_goal_or_assist", {"name": name, "team": team}
+
+    # ── Fixed-shape markets (checked after numeric patterns) ──
+    mapping = {
+        (f"will {h} win",        "regulation"): "home_win",
+        (f"will {a} win",        "regulation"): "away_win",
+        (f"will the {h} win",    "regulation"): "home_win",
+        (f"will the {a} win",    "regulation"): "away_win",
+        ("ahead at halftime",    h):            "home_lead_ht",
+        ("ahead at halftime",    a):            "away_lead_ht",
+        ("score the first goal", h):            "home_scores_first",
+        (f"will the {h} score the first", ""):  "home_scores_first",
+        ("both teams score",     ""):           "btts",
+        ("score in both halves", h):            "home_scores_both_halves",
+        ("goal be scored before","hydration"):  "goal_before_break",
+        # "goal in stoppage time" — must be more specific than just "stoppage"
+        ("goal in stoppage",     ""):           "stoppage_time_goal",
+        ("goal scored in stoppage",""):         "stoppage_time_goal",
+        ("red card",             ""):           "red_card",
+    }
+    for (kw1, kw2), key in mapping.items():
+        if kw1 in q and (not kw2 or kw2 in q):
+            return key, None
 
     return None, None
 
@@ -565,8 +590,7 @@ def run(home_team, away_team,
 
     def final_p(model_key, mkt_p=None):
         mp = mkts.get(model_key, 0.5)
-        fp = (MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p) if mkt_p else mp
-        return to_platform_int(fp)
+        return (MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p) if mkt_p else mp
 
     def to_platform_int(p):
         return max(1, min(99, round(p * 100)))
@@ -594,10 +618,10 @@ def run(home_team, away_team,
         share = data["share"]
         p_goal   = player_goal_p(lam, share)
         p_assist = p_goal * 0.65
-        predictions[f"{player}_goal"]           = to_platform_int(p_goal)
-        predictions[f"{player}_goal_or_assist"] = to_platform_int(p_goal + p_assist - p_goal*p_assist)
-        predictions[f"{player}_1plus_sot"]      = to_platform_int(player_sot_p(lam, share, 1))
-        predictions[f"{player}_2plus_sot"]      = to_platform_int(player_sot_p(lam, share, 2))
+        predictions[f"{player}_goal"]           = p_goal
+        predictions[f"{player}_goal_or_assist"] = p_goal + p_assist - p_goal*p_assist
+        predictions[f"{player}_1plus_sot"]      = player_sot_p(lam, share, 1)
+        predictions[f"{player}_2plus_sot"]      = player_sot_p(lam, share, 2)
 
     # ── 5. Review dashboard ────────────────────────────────────────
     print(f"\n[5/5] Review dashboard:")

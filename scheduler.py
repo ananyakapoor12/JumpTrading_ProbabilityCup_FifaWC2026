@@ -245,7 +245,7 @@ def predict_and_submit(home_team, away_team, state,
 
     def fp(model_key, mkt_p=None):
         mp = mkts.get(model_key, 0.5)
-        return _to_int(MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p if mkt_p else mp)
+        return MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p if mkt_p else mp
 
     def player_goal_p(lam, share):
         import math
@@ -278,10 +278,10 @@ def predict_and_submit(home_team, away_team, state,
         share = d["share"]
         p_g   = player_goal_p(lam, share)
         p_a   = p_g * 0.65
-        predictions[f"{player}_goal"]           = _to_int(p_g)
-        predictions[f"{player}_goal_or_assist"] = _to_int(p_g + p_a - p_g * p_a)
-        predictions[f"{player}_1plus_sot"]      = _to_int(player_sot_p(lam, share, 1))
-        predictions[f"{player}_2plus_sot"]      = _to_int(player_sot_p(lam, share, 2))
+        predictions[f"{player}_goal"]           = p_g
+        predictions[f"{player}_goal_or_assist"] = p_g + p_a - p_g * p_a
+        predictions[f"{player}_1plus_sot"]      = player_sot_p(lam, share, 1)
+        predictions[f"{player}_2plus_sot"]      = player_sot_p(lam, share, 2)
 
     # Apply any manual overrides from state
     overrides = get_overrides(state, home_team, away_team)

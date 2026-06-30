@@ -128,12 +128,13 @@ def run_full_pipeline(home_team, away_team,
 
     def fp(model_key, mkt_p=None):
         mp = mkts.get(model_key, 0.5)
-        return to_int(MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p if mkt_p else mp)
+        return MODEL_WEIGHT * mp + MARKET_WEIGHT * mkt_p if mkt_p else mp
 
     predictions = {
         "home_win":               fp("home_win",  fair_3way["home"] if fair_3way else None),
         "away_win":               fp("away_win",  fair_3way["away"] if fair_3way else None),
         "home_lead_ht":           fp("home_lead_ht"),
+        "away_lead_ht":           fp("away_lead_ht"),
         "home_scores_first":      fp("home_scores_first"),
         "over_2_5":               fp("over_2_5",  fair_ou["over"] if fair_ou else None),
         "btts":                   fp("btts"),
@@ -155,10 +156,10 @@ def run_full_pipeline(home_team, away_team,
         share = d["share"]
         p_g   = player_goal_p(lam, share)
         p_a   = p_g * 0.65
-        predictions[f"{player}_goal"]           = to_int(p_g)
-        predictions[f"{player}_goal_or_assist"] = to_int(p_g + p_a - p_g * p_a)
-        predictions[f"{player}_1plus_sot"]      = to_int(player_sot_p(lam, share, 1))
-        predictions[f"{player}_2plus_sot"]      = to_int(player_sot_p(lam, share, 2))
+        predictions[f"{player}_goal"]           = p_g
+        predictions[f"{player}_goal_or_assist"] = p_g + p_a - p_g * p_a
+        predictions[f"{player}_1plus_sot"]      = player_sot_p(lam, share, 1)
+        predictions[f"{player}_2plus_sot"]      = player_sot_p(lam, share, 2)
 
     # ── 6. Review dashboard ────────────────────────────────────────
     print(f"\n[6/6] Review dashboard:\n")
