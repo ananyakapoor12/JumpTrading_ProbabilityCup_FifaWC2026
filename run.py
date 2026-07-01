@@ -37,6 +37,11 @@ from pipeline_v2   import (fit_strengths, compute_anchored_lambdas, score_matrix
                             remove_vig, SHOT_SHARES, MODEL_WEIGHT, MARKET_WEIGHT,
                             classify, resolve_prediction)
 from api_client    import KapbotClient
+try:
+    from form_data import compute_elo_ratings, load_player_form_cache, compute_enhanced_shot_shares, get_team_elo
+    FORM_DATA_AVAILABLE = True
+except ImportError:
+    FORM_DATA_AVAILABLE = False
 import math
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -74,9 +79,18 @@ def run_full_pipeline(home_team, away_team,
         print("  ERROR: Could not fetch match data. Check internet connection.")
         sys.exit(1)
 
-    # ── 2. Fit team strengths ──────────────────────────────────────
+    # ── 2. Fit team strengths + fetch Elo ratings ─────────────────
     print("\n[2/6] Fitting team strengths (MLE on live xG data)...")
     params = fit_strengths(matches=matches, verbose=True)
+
+    elo_ratings = {}
+    if FORM_DATA_AVAILABLE:
+        print("  [form] Fetching Elo ratings from international results...")
+        elo_ratings = compute_elo_ratings(verbose=True)
+        if elo_ratings:
+            elo_h = get_team_elo(home_team, elo_ratings)
+            elo_a = get_team_elo(away_team, elo_ratings)
+            print(f"  [form] Elo: {home_team}={elo_h:.0f}  {away_team}={elo_a:.0f}")
 
     for team in [home_team, away_team]:
         if team not in params:
@@ -96,7 +110,8 @@ def run_full_pipeline(home_team, away_team,
 
     lam_h, lam_a, lam_h_raw, lam_a_raw = compute_anchored_lambdas(
         home_team, away_team, params, market_3way, market_ou,
-        is_knockout, neutral_venue
+        is_knockout, neutral_venue,
+        elo_ratings=elo_ratings if FORM_DATA_AVAILABLE else None
     )
 
     print(f"  Raw model:  λ_{home_team}={lam_h_raw:.3f}  λ_{away_team}={lam_a_raw:.3f}")
@@ -199,7 +214,16 @@ def run_full_pipeline(home_team, away_team,
             for i, (q, k) in enumerate(q_templates)
         ]
 
-    lambdas = mkts.get("_lambdas", {})
+    # Build lambdas dict for threshold-based markets
+    dominance = lam_h / (lam_h + lam_a)
+    lambdas = {
+        "home_sot":     lam_h / 0.33,
+        "away_sot":     lam_a / 0.33,
+        "home_corners": max(3.0, min(9.0, 5.0 * dominance / 0.5)),
+        "away_corners": max(3.0, min(9.0, 5.0 * (1 - dominance) / 0.5)),
+        "cards":        3.8,
+        "offsides":     3.2 * (1 + (dominance - 0.5) * 0.8),
+    }
     submission_list = []
     for i, mkt in enumerate(markets, 1):
         q     = mkt["question"]

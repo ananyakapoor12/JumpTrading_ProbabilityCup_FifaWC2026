@@ -590,6 +590,49 @@ def classify(question, home, away):
     if "own goal be scored" in q or "an own goal" in q:
         return "own_goal", None
 
+    # ── NEW: second-half stoppage time goal ───────────────────────────────────
+    if ("second-half stoppage" in q or "second half stoppage" in q) and "goal" in q:
+        return "goal_2h_stoppage", None
+
+    # ── NEW: early corners before first hydration break ───────────────────────
+    mc = re.search(r"(\d+) or more corner kicks? (?:be )?taken before the first hydration", q)
+    if mc:
+        return "early_corners", {"thr": int(mc.group(1))}
+
+    # ── NEW: substitution before halftime ─────────────────────────────────────
+    if "substitution" in q and ("before halftime" in q or "before half" in q):
+        return "sub_before_ht", None
+
+    # ── NEW: win by 2+ goals ──────────────────────────────────────────────────
+    mw = re.search(r"(\d+) or more goals?", q)
+    if mw and ("win by" in q or "winning margin" in q):
+        home_wins = h in q.split("win by")[0] if "win by" in q else True
+        return "win_by_margin", {"margin": int(mw.group(1)), "home": home_wins}
+
+    # ── NEW: comparative cards ("receive more cards than") ────────────────────
+    if "more cards than" in q or "receive more cards" in q:
+        away_more = a in q.split("more cards")[0] if "more cards" in q else False
+        return "cards_dominance", {"away_more": away_more}
+
+    # ── NEW: card shown in first half ─────────────────────────────────────────
+    if "card" in q and "first half" in q and "shown" in q:
+        return "card_first_half", None
+
+    # ── NEW: "at least N shots on target" (player prop alternate phrasing) ────
+    ma = re.search(r"at least (\d+) shot", q)
+    if ma:
+        # Extract name by stopping at " have" or " (" (team bracket)
+        raw = question.replace("Will ", "")
+        if " have " in raw:
+            pname = raw.split(" have ")[0].strip()
+        elif " (" in raw:
+            pname = raw.split(" (")[0].strip()
+        else:
+            pname = raw.split(" ")[0].strip()
+        pteam = "home" if h in q else "away"
+        pthr  = int(ma.group(1))
+        return f"player_{pthr}plus_sot", {"name": pname, "team": pteam, "thr": pthr}
+
     return None, None
 
 
@@ -685,8 +728,7 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
             from scipy.stats import poisson as sp_poisson
             return float(1 - sp_poisson.cdf(pd["thr"] - 1, lam_total_shots))
         except ImportError:
-            # Fallback: approximate with normal distribution
-            import math
+            # Fallback: approximate with normal distribution (math already imported)
             z = (pd["thr"] - lam_total_shots) / math.sqrt(lam_total_shots)
             return float(1 - 0.5 * (1 + math.erf(z / math.sqrt(2))))
 
@@ -718,16 +760,85 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
         p_both = 0.05
         return p_pen + p_red - p_both
 
+    # ── NEW: second-half stoppage time goal ──────────────────────────────────
+    if key == "goal_2h_stoppage":
+        # ~3 minutes of stoppage, P(goal in 3 min) = 1 - exp(-lam_total * 3/90)
+        return 1 - math.exp(-(lam_h + lam_a) * (3/90))
+
+    # ── NEW: early corners before first hydration break ───────────────────────
+    if key == "early_corners" and pd:
+        # ~30 min in; corners scale with dominance and time
+        dominance   = lam_h / (lam_h + lam_a)
+        lam_cor_h30 = max(1.5, min(4.5, 5.0 * dominance / 0.5)) * (30/90)
+        lam_cor_a30 = max(1.5, min(4.5, 5.0 * (1-dominance) / 0.5)) * (30/90)
+        lam_cor_30  = lam_cor_h30 + lam_cor_a30
+        return 1 - sum(pois(lam_cor_30, k) for k in range(pd["thr"]))
+
+    # ── NEW: substitution before halftime ─────────────────────────────────────
+    if key == "sub_before_ht":
+        # ~25% of WC matches see a tactical/injury sub before HT
+        return 0.25
+
+    # ── NEW: win by margin ────────────────────────────────────────────────────
+    if key == "win_by_margin" and pd:
+        margin = pd["margin"]
+        lam_f  = lam_h if pd.get("home", True) else lam_a
+        lam_ag = lam_a if pd.get("home", True) else lam_h
+        n = 11  # sum up to 10 goals per team
+        p = 0.0
+        for i in range(1, n):
+            for j in range(max(0, i - 20), i - margin + 1):
+                if j >= 0:
+                    p += pois(lam_f, i) * pois(lam_ag, j)
+        return min(0.99, p)
+
+    # ── NEW: comparative cards market ─────────────────────────────────────────
+    if key == "cards_dominance" and pd:
+        # Approximate via Poisson race on card counts
+        # Away team (weaker) tends to get more cards when losing
+        # Base split: dominant team gets 40% of cards, weaker team 60%
+        dominance = lam_h / (lam_h + lam_a)
+        if pd.get("away_more"):
+            # P(away gets more cards) — away team is usually weaker → slightly favoured
+            return min(0.65, 0.50 + (0.5 - dominance) * 0.5)
+        else:
+            return min(0.65, 0.50 + (dominance - 0.5) * 0.5)
+
+    # ── NEW: card shown in first half ─────────────────────────────────────────
+    if key == "card_first_half":
+        # ~55% of WC matches have at least one card in the first half
+        # Scales slightly with expected match intensity
+        total_lam = lam_h + lam_a
+        return min(0.70, 0.55 * (total_lam / 2.5))
+
     # Player props resolved by name from predictions dict
     if pd:
         name = pd.get("name", "")
         thr  = pd.get("thr", 2)
+
+        # Fuzzy name match: normalise accents/spaces so "Demirović" matches "Demirovic"
+        def _norm(s):
+            # Transliterate accented chars before ascii encoding so ć→c, ø→o, etc.
+            import unicodedata
+            nfkd = unicodedata.normalize("NFKD", s.lower())
+            return "".join(c for c in nfkd if not unicodedata.combining(c)).replace("-"," ").strip()
+
+        def _find_key(suffix):
+            exact = f"{name}{suffix}"
+            if exact in predictions:
+                return predictions[exact]
+            norm_name = _norm(name)
+            for k, v in predictions.items():
+                if k.endswith(suffix) and _norm(k[:-len(suffix)]) == norm_name:
+                    return v
+            return None
+
         if "goal_or_assist" in (key or ""):
-            return predictions.get(f"{name}_goal_or_assist")
+            return _find_key("_goal_or_assist")
         if "goal" in (key or ""):
-            return predictions.get(f"{name}_goal")
+            return _find_key("_goal")
         if "sot" in (key or ""):
-            return predictions.get(f"{name}_{thr}plus_sot")
+            return _find_key(f"_{thr}plus_sot")
 
     return None
 
