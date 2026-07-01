@@ -484,6 +484,10 @@ def classify(question, home, away):
         return "threshold", {"category": cat, "thr": thr}
 
     # Player goal / assist props
+    # "Will a substitute score a goal..." — special team-level market
+    if "substitute" in q and "score a goal" in q:
+        return "substitute_goal", None
+
     # "Will PlayerName (TeamName) score a goal (excluding own goals)..."
     if "score a goal" in q and "excluding own goals" in q:
         nm = re.match(r'Will\s+(.+?)\s+score a goal', question, re.I)
@@ -499,6 +503,10 @@ def classify(question, home, away):
         name = re.sub(r'\s*\([^)]+\)\s*$', '', name).strip()
         team = "home" if h in q else "away"
         return "player_goal_or_assist", {"name": name, "team": team}
+
+    # ── Combined penalty-or-red-card market ──────────────────────────────────
+    if "penalty" in q and "red card" in q and ("or" in q):
+        return "penalty_or_red_card", None
 
     # ── Second hydration break events (≈76' onward) ──
     if "after the second hydration break" in q and "goal" in q:
@@ -666,13 +674,21 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
 
     # ── NEW: total_shots_threshold ────────────────────────────────────────
     if key == "total_shots_threshold" and pd:
-        # Total shots (on + off target) ~ SOT / shot_on_target_rate
-        # WC average shot on target rate ≈ 0.38 (38% of shots on target)
-        sot_rate     = 0.38
-        lam_shots_h  = (lam_h / 0.33) / sot_rate   # total shots home
-        lam_shots_a  = (lam_a / 0.33) / sot_rate   # total shots away
-        lam_shots_total = lam_shots_h + lam_shots_a
-        return 1 - sum(pois(lam_shots_total, k) for k in range(pd["thr"]))
+        # Total shots (on + off target) = expected goals / shot_to_goal_rate
+        # WC shot-to-goal rate ≈ 0.10 (one goal per ~10 total attempts)
+        # This gives total shots lambda directly from goal lambda.
+        # Must use scipy.stats.poisson for numerical stability —
+        # our custom pois() overflows factorial for lambda > ~15.
+        shots_per_goal  = 10.0
+        lam_total_shots = (lam_h + lam_a) * shots_per_goal
+        try:
+            from scipy.stats import poisson as sp_poisson
+            return float(1 - sp_poisson.cdf(pd["thr"] - 1, lam_total_shots))
+        except ImportError:
+            # Fallback: approximate with normal distribution
+            import math
+            z = (pd["thr"] - lam_total_shots) / math.sqrt(lam_total_shots)
+            return float(1 - 0.5 * (1 + math.erf(z / math.sqrt(2))))
 
     # ── NEW: goal_outside_box ─────────────────────────────────────────────
     if key == "goal_outside_box":
@@ -684,6 +700,23 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
     if key == "own_goal":
         # Own goals occur in ~7% of WC matches (roughly 1 per 14 games)
         return 0.07
+
+    # ── NEW: substitute_goal ──────────────────────────────────────────────
+    if key == "substitute_goal":
+        # ~35% of WC knockout matches see a sub score
+        # Scales slightly with total expected goals (more goals = more chances for subs)
+        base_rate = 0.35
+        total_lam = lam_h + lam_a
+        return min(0.55, base_rate * (total_lam / 2.5))
+
+    # ── NEW: penalty_or_red_card ──────────────────────────────────────────
+    if key == "penalty_or_red_card":
+        # P(A or B) = P(A) + P(B) - P(A and B)
+        # Penalty base rate ~28%, red card ~20%, both ~5%
+        p_pen = 0.28
+        p_red = 0.20
+        p_both = 0.05
+        return p_pen + p_red - p_both
 
     # Player props resolved by name from predictions dict
     if pd:
