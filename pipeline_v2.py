@@ -353,13 +353,21 @@ def fit_strengths(matches=WC2026_MATCHES, base=BASE_RATE,
 
 def compute_anchored_lambdas(home_team, away_team, team_params,
                               market_odds_3way=None, market_odds_ou=None,
-                              is_knockout=True, neutral_venue=True):
+                              is_knockout=True, neutral_venue=True,
+                              elo_ratings=None):
     """
-    Compute expected goals anchored to the betting market's O/U line.
+    Compute expected goals with two anchoring layers.
 
-    WHY: With only 3 group stage games per team, our raw Poisson lambdas
-    can be too extreme. The O/U market aggregates thousands of sharp bettors.
-    We solve for λ_total from the market, then split using our model's ratio.
+    Layer 1 - O/U market anchor (existing):
+      Solves for lambda_total that matches the live over/under market,
+      then splits by MLE model ratio. Stops Poisson drifting from market
+      consensus on total goals.
+
+    Layer 2 - Elo split adjustment (new):
+      Blends the home/away ratio with the Elo-implied ratio (35% Elo,
+      65% MLE). Guards against MLE overfitting on 2-3 noisy group games.
+      Example: if Germany looked dominant in groups but their Elo is
+      average, Elo pulls the split toward reality.
 
     Returns (lam_home, lam_away, model_lam_h, model_lam_a)
     """
@@ -369,21 +377,28 @@ def compute_anchored_lambdas(home_team, away_team, team_params,
     ko_adj   = 0.92 if is_knockout  else 1.0
     home_adv = 1.00 if neutral_venue else 1.12
 
-    # Raw model lambdas
     lam_h_model = BASE_RATE * hp["attack"] * ap["defence"] * home_adv * ko_adj
     lam_a_model = BASE_RATE * ap["attack"] * hp["defence"] * ko_adj
 
-    # If we have an O/U market, anchor to it
+    # Layer 1: anchor total to O/U market
     if market_odds_ou:
         fair_ou, _ = remove_vig(market_odds_ou)
         lam_total_market = solve_lambda_from_ou(fair_ou["under"])
-
-        # Split using model ratio
         ratio_h  = lam_h_model / (lam_h_model + lam_a_model)
         lam_h    = lam_total_market * ratio_h
         lam_a    = lam_total_market * (1 - ratio_h)
     else:
         lam_h, lam_a = lam_h_model, lam_a_model
+
+    # Layer 2: blend home/away split with Elo-implied ratio
+    if elo_ratings:
+        try:
+            from form_data import elo_lambda_adjustment, get_team_elo
+            elo_h = get_team_elo(home_team, elo_ratings)
+            elo_a = get_team_elo(away_team, elo_ratings)
+            lam_h, lam_a = elo_lambda_adjustment(elo_h, elo_a, lam_h, lam_a)
+        except Exception:
+            pass
 
     return lam_h, lam_a, lam_h_model, lam_a_model
 
@@ -538,6 +553,35 @@ def classify(question, home, away):
         if kw1 in q and (not kw2 or kw2 in q):
             return key, None
 
+    # ── NEW: 2 or fewer total goals ("under 2.5" phrased as a cap) ──────────
+    m = re.search(r"(\d+)\s+or fewer total goals", q)
+    if m:
+        thr = int(m.group(1))   # e.g. "2 or fewer" = P(goals <= 2) = P(under 2.5)
+        return "under_goals_threshold", {"thr": thr}
+
+    # ── NEW: comparative SOT ("more shots on target than") ────────────────────
+    if "more shots on target than" in q:
+        home_more = h in q.split("more shots on target than")[0]
+        return "sot_dominance", {"home": home_more}
+
+    # ── NEW: total corners (both teams combined) ───────────────────────────────
+    m = re.search(r"(\d+)\s+or more total corner", q)
+    if m:
+        return "total_corners_threshold", {"thr": int(m.group(1))}
+
+    # ── NEW: total shots — on AND off target combined ─────────────────────────
+    m = re.search(r"(\d+)\s+or more total shots", q)
+    if m:
+        return "total_shots_threshold", {"thr": int(m.group(1))}
+
+    # ── NEW: goal from outside the penalty area ───────────────────────────────
+    if "outside the penalty area" in q and "goal" in q:
+        return "goal_outside_box", None
+
+    # ── NEW: own goal ─────────────────────────────────────────────────────────
+    if "own goal be scored" in q or "an own goal" in q:
+        return "own_goal", None
+
     return None, None
 
 
@@ -590,6 +634,56 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
 
     if key == "both_teams_carded":
         return both_teams_carded_p(lambdas.get("cards", 3.5))
+
+    # ── NEW: under_goals_threshold — "2 or fewer total goals" ──────────────
+    if key == "under_goals_threshold" and pd:
+        # P(total goals <= thr) = sum of Poisson PMF from 0 to thr inclusive
+        total_lam = lam_h + lam_a
+        return sum(pois(total_lam, k) for k in range(pd["thr"] + 1))
+
+    # ── NEW: sot_dominance — "more shots on target than opponent" ─────────
+    if key == "sot_dominance" and pd:
+        # Approximate via SOT lambdas: home SOT ~ lam_h/0.33
+        sot_h = lam_h / 0.33
+        sot_a = lam_a / 0.33
+        # P(home SOT > away SOT) via Poisson race — analytical approximation:
+        # P(X > Y) where X~Pois(a), Y~Pois(b) = sum_k P(Y=k)*P(X>k)
+        p_home_more = 0.0
+        for k in range(25):   # 25 is effectively infinity for SOT counts
+            p_y_eq_k = pois(sot_a, k)
+            p_x_gt_k = 1 - sum(pois(sot_h, j) for j in range(k + 1))
+            p_home_more += p_y_eq_k * p_x_gt_k
+        return p_home_more if pd["home"] else 1 - p_home_more
+
+    # ── NEW: total_corners_threshold ──────────────────────────────────────
+    if key == "total_corners_threshold" and pd:
+        # Total corners ~ Pois(lam_corners_h + lam_corners_a)
+        dominance_h  = lam_h / (lam_h + lam_a)
+        lam_cor_h    = max(3.0, min(9.0, 5.0 * dominance_h / 0.5))
+        lam_cor_a    = max(3.0, min(9.0, 5.0 * (1 - dominance_h) / 0.5))
+        lam_total_cor = lam_cor_h + lam_cor_a
+        return 1 - sum(pois(lam_total_cor, k) for k in range(pd["thr"]))
+
+    # ── NEW: total_shots_threshold ────────────────────────────────────────
+    if key == "total_shots_threshold" and pd:
+        # Total shots (on + off target) ~ SOT / shot_on_target_rate
+        # WC average shot on target rate ≈ 0.38 (38% of shots on target)
+        sot_rate     = 0.38
+        lam_shots_h  = (lam_h / 0.33) / sot_rate   # total shots home
+        lam_shots_a  = (lam_a / 0.33) / sot_rate   # total shots away
+        lam_shots_total = lam_shots_h + lam_shots_a
+        return 1 - sum(pois(lam_shots_total, k) for k in range(pd["thr"]))
+
+    # ── NEW: goal_outside_box ─────────────────────────────────────────────
+    if key == "goal_outside_box":
+        # ~10% of WC goals come from outside the box historically
+        total_goals_p = 1 - sum(pois(lam_h + lam_a, k) for k in range(1))
+        return 1 - (1 - 0.10) ** max(1, round((lam_h + lam_a) * 1.5))
+
+    # ── NEW: own_goal ─────────────────────────────────────────────────────
+    if key == "own_goal":
+        # Own goals occur in ~7% of WC matches (roughly 1 per 14 games)
+        return 0.07
 
     # Player props resolved by name from predictions dict
     if pd:
