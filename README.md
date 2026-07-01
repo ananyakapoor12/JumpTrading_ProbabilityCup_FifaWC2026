@@ -4,10 +4,9 @@ Automated match prediction system for the SportsPredict Probability Cup. Built a
 
 ---
 
----
 
-## 1. System Architecture
+## 1. Pipeline Overview
 
 ```
-
+![Pipeline Overview](figures/full_pipeline_overview.png)
 ```
