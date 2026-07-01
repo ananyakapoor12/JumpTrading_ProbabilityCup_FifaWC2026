@@ -252,10 +252,18 @@ def run_full_pipeline(home_team, away_team,
             if not payload:
                 print("  No real markets to submit (all sample questions).")
             else:
-                result = client.submit_batch(payload)
+                result = client.submit_or_update_batch(payload)
                 if result:
-                    print(f"  Submitted {result.get('succeeded','?')} OK, "
-                          f"{result.get('failed','?')} failed.")
+                    print(f"  {result.get('updated',0)} updated, "
+                          f"{result.get('created',0)} newly created, "
+                          f"{result.get('failed',0)} failed "
+                          f"({result.get('succeeded',0)}/{len(payload)} total OK)")
+                    if result.get("failed", 0):
+                        print("\n  Failures:")
+                        for item in result.get("results", []):
+                            if not item.get("success", True):
+                                print(f"    {item.get('market_id','?')[:8]}…  "
+                                      f"{item.get('error','unknown error')}")
                 else:
                     print("  Submission failed — check KAPBOT_API_KEY.")
         else:

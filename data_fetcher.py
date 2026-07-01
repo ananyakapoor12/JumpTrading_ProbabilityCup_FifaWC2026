@@ -60,8 +60,13 @@ ODDS_API_SPORT   = "soccer_fifa_world_cup"
 
 # Shot share floors and defaults
 MIN_SHARE   = 0.08   # minimum share for any starting player (even 0 scorers)
-MAX_SHARE   = 0.55   # cap so one player can't dominate
-GOAL_WEIGHT = 0.70   # weight on goals scored vs positional prior
+MAX_SHARE   = 0.65   # raised from 0.55 — explosive scorers (Haaland 4G) were
+                      # getting capped below their true share of team output
+GOAL_WEIGHT = 0.70   # weight on goals scored vs positional prior (base, <2 goals)
+GOAL_WEIGHT_PROVEN = 0.85  # higher weight once a player has 2+ tournament goals —
+                            # the blend toward generic positional prior was
+                            # systematically dragging down proven scorers
+                            # (Havertz 35%, Wirtz 44%, Enciso 32% all fired)
 
 # Positional priors: what share of goals does each position typically take?
 # Used to allocate share to players who haven't scored yet
@@ -112,7 +117,12 @@ PLAYER_POSITIONS = {
     # Belgium
     "Romelu Lukaku":  "striker",    "Dodi Lukebakio": "winger",
     # Norway
-    "Erling Haaland": "striker",
+  "Erling Haaland": "striker",
+  "Martin Ødegaard": "attacking", "Martin Odegaard": "attacking",
+  "Alexander Sørloth": "striker", "Alexander Sorloth": "striker",
+  "Amad Diallo": "winger",
+  "Sébastien Haller": "striker", "Sebastien Haller": "striker",
+  "Franck Kessié": "midfielder",
     # Colombia
     "Jhon Durán":     "striker",    "Jhon Duran":     "striker",
     # USA
@@ -245,8 +255,13 @@ def build_player_shot_shares(data, min_share=MIN_SHARE, max_share=MAX_SHARE):
         pos   = PLAYER_POSITIONS.get(player, "midfielder")
         prior = POSITIONAL_PRIORS.get(pos, 0.10)
 
+        # Proven scorers (2+ tournament goals) get weighted more on
+        # actual output rather than diluted toward the generic positional
+        # prior — fixes systematic underweighting of in-form players
+        weight = GOAL_WEIGHT_PROVEN if d["goals"] >= 2 else GOAL_WEIGHT
+
         # Blend
-        raw_share = GOAL_WEIGHT * goal_share + (1 - GOAL_WEIGHT) * prior
+        raw_share = weight * goal_share + (1 - weight) * prior
 
         # Apply min/max
         raw_share = max(min_share, min(max_share, raw_share))
@@ -286,6 +301,11 @@ def build_player_shot_shares(data, min_share=MIN_SHARE, max_share=MAX_SHARE):
         "Matheus Cunha": "Brazil", "Rodrygo": "Brazil",
         "Cristiano Ronaldo": "Portugal", "Rafael Leão": "Portugal",
         "Erling Haaland": "Norway",
+        "Martin Ødegaard": "Norway", "Martin Odegaard": "Norway",
+        "Alexander Sørloth": "Norway", "Alexander Sorloth": "Norway",
+        "Marcus Holmgren Pedersen": "Norway", "Leo Østigard": "Norway",
+        "Amad Diallo": "Ivory Coast", "Sébastien Haller": "Ivory Coast",
+        "Sebastien Haller": "Ivory Coast", "Franck Kessié": "Ivory Coast",
         "Folarin Balogun": "USA",
         "Ismael Saibari": "Morocco",
     }

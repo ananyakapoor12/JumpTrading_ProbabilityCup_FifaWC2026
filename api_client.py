@@ -192,6 +192,72 @@ class KapbotClient:
             print(f"  [api] predictions fetch failed: {e}")
             return []
 
+    def submit_or_update_batch(self, predictions: list) -> dict:
+        """
+        Smart batch submit: for each prediction, checks whether you
+        already have one on that market. If so, calls update_prediction
+        (PATCH) instead of submit (POST), so re-running the pipeline
+        right up until kickoff always refreshes your numbers instead
+        of failing with "Prediction for this market already exists".
+
+        Each entry in `predictions` must be:
+            {"market_id": str, "lobby_id": str, "probability": int}
+
+        Returns: {"succeeded": int, "failed": int, "updated": int,
+                  "created": int, "results": [...]}
+        """
+        existing = self.get_predictions()
+        existing_by_market = {p["market_id"]: p for p in existing}
+
+        to_create = []
+        to_update = []  # (prediction_id, market_id, probability)
+
+        for p in predictions:
+            mid = p["market_id"]
+            if mid in existing_by_market:
+                pred = existing_by_market[mid]
+                # Skip if already settled — can't update a closed market
+                if pred.get("market_status") == "settled":
+                    continue
+                to_update.append((pred["id"], mid, p["probability"]))
+            else:
+                to_create.append(p)
+
+        results = []
+        updated, created, failed = 0, 0, 0
+
+        # Updates — one PATCH call per market (no batch update endpoint)
+        for pred_id, mid, prob in to_update:
+            r = self.update_prediction(pred_id, prob)
+            if r:
+                updated += 1
+                results.append({"market_id": mid, "action": "updated",
+                                "success": True, "probability": prob})
+            else:
+                failed += 1
+                results.append({"market_id": mid, "action": "updated",
+                                "success": False, "error": "PATCH failed"})
+
+        # New submissions — one batch POST for everything not yet predicted
+        if to_create:
+            r = self.submit_batch(to_create)
+            if r:
+                created += r.get("succeeded", len(to_create))
+                failed  += r.get("failed", 0)
+                results.extend(r.get("results", []))
+            else:
+                failed += len(to_create)
+                results.append({"action": "created", "success": False,
+                                "error": "batch submit failed"})
+
+        return {
+            "succeeded": updated + created,
+            "failed":    failed,
+            "updated":   updated,
+            "created":   created,
+            "results":   results,
+        }
+
     def get_results(self) -> list:
         """List settled predictions with Brier scores for the active lobby."""
         lid = self.lobby_id()
