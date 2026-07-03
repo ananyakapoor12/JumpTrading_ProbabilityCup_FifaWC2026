@@ -633,6 +633,26 @@ def classify(question, home, away):
         pthr  = int(ma.group(1))
         return f"player_{pthr}plus_sot", {"name": pname, "team": pteam, "thr": pthr}
 
+    # ── NEW: any player scores 2+ goals (brace / hat-trick market) ──────────
+    # "Will any player score 2 or more goals..." — no specific player named
+    if "any player score" in q or ("any player" in q and "goal" in q):
+        m2 = re.search(r"(\d+) or more goals", q)
+        thr = int(m2.group(1)) if m2 else 2
+        return "any_player_brace", {"thr": thr}
+
+    # ── NEW: draw / tied at halftime ─────────────────────────────────────────
+    if "tied at halftime" in q or "draw at halftime" in q or "level at halftime" in q:
+        return "draw_ht", None
+
+    # ── NEW: header goal ──────────────────────────────────────────────────────
+    if "header goal" in q or "headed goal" in q:
+        return "header_goal", None
+
+    # ── NEW: team advances / qualifies ────────────────────────────────────────
+    if "advance" in q or "qualify" in q or ("round of" in q and "total" not in q):
+        team = h if h.lower() in q else a
+        return "team_advances", {"team": team, "home_team": h}
+
     return None, None
 
 
@@ -806,10 +826,59 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
 
     # ── NEW: card shown in first half ─────────────────────────────────────────
     if key == "card_first_half":
-        # ~55% of WC matches have at least one card in the first half
-        # Scales slightly with expected match intensity
         total_lam = lam_h + lam_a
         return min(0.70, 0.55 * (total_lam / 2.5))
+
+    # ── NEW: any_player_brace — "will any player score 2+ goals" ───────────
+    if key == "any_player_brace" and pd:
+        thr = pd.get("thr", 2)
+        # P(at least one player scores 2+) using total match lambda.
+        # A player scoring 2+ goals requires roughly:
+        #   - At least 2 total goals in the match (necessary condition)
+        #   - Goals concentrated on one player rather than spread
+        # Approximation: P(any player braces) ≈ P(total goals >= 2*thr) * concentration_factor
+        # Concentration: in WC, ~25% of multi-goal games see one player score 2+
+        # This scales up for dominant teams (one attacker gets most chances)
+        total_lam = lam_h + lam_a
+        dominance  = max(lam_h, lam_a) / total_lam  # dominant team share
+        p_enough_goals = 1 - sum(pois(total_lam, k) for k in range(thr))
+        # Concentration factor: higher dominance = more likely one player bags 2+
+        concentration = 0.25 + (dominance - 0.5) * 0.30
+        return p_enough_goals * concentration
+
+    # ── NEW: draw_ht ("tied at halftime") ────────────────────────────────────
+    if key == "draw_ht":
+        p = predictions.get("draw_ht")
+        if p is not None:
+            return p / 100 if p > 1 else p
+        lh_ht = lam_h * 0.45
+        la_ht = lam_a * 0.45
+        return sum(pois(lh_ht, k) * pois(la_ht, k) for k in range(8))
+
+    # ── NEW: header_goal ──────────────────────────────────────────────────────
+    # ~22% of WC goals come from headers (set pieces + crosses)
+    # P(at least 1 header goal) = 1 - e^(-lambda * 0.22)
+    if key == "header_goal":
+        return 1 - math.exp(-(lam_h + lam_a) * 0.22)
+
+    # ── NEW: team_advances ────────────────────────────────────────────────────
+    # P(team advances) = P(win in reg) + P(draw) * 0.5
+    # (draw goes to ET/pens, modelled as a coin flip)
+    if key == "team_advances" and pd:
+        team = pd.get("team", "")
+        def _get(k): v = predictions.get(k, 50); return v/100 if v > 1 else v
+        p_hw, p_d, p_aw = _get("home_win"), _get("draw"), _get("away_win")
+        # team_advances pd contains the full team name string, not h/a variables
+        # Compare against home_win/away_win keys in predictions to determine side
+        # If we built predictions["home_win"] for this team, they are home
+        home_name = pd.get("home_team", "")  # not always set
+        # Use a simple heuristic: if team name appears in question as first team
+        # classified as "home", use p_hw; otherwise p_aw
+        # The team field was set as h if h.lower() in q, so we check predictions
+        # Portugal is always the "home" team in this match context
+        home_team = pd.get("home_team", "")
+        is_home = team.lower() == home_team.lower() if home_team else True
+        return (p_hw + p_d * 0.5) if is_home else (p_aw + p_d * 0.5)
 
     # Player props resolved by name from predictions dict
     if pd:
