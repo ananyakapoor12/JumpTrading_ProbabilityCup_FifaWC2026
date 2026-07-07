@@ -118,6 +118,9 @@ PLAYER_POSITIONS = {
     "Romelu Lukaku":  "striker",    "Dodi Lukebakio": "winger",
     # Norway
   "Erling Haaland": "striker",
+  "Michael Olise": "winger", "Randal Kolo Muani": "striker",
+  "Adrien Rabiot": "midfielder", "Eduardo Camavinga": "midfielder",
+  "Antonio Sanabria": "striker", "Robert Morales": "winger",
   "Bruno Fernandes": "attacking", "Bernardo Silva": "attacking",
   "Diogo Jota": "striker", "João Félix": "attacking", "Joao Felix": "attacking",
   "Vitinha": "midfielder", "Rúben Neves": "midfielder",
@@ -325,6 +328,13 @@ def build_player_shot_shares(data, min_share=MIN_SHARE, max_share=MAX_SHARE):
         "Matheus Cunha": "Brazil", "Rodrygo": "Brazil",
         "Cristiano Ronaldo": "Portugal", "Rafael Leão": "Portugal",
         "Erling Haaland": "Norway",
+        # France
+        "Michael Olise": "France", "Randal Kolo Muani": "France",
+        "Adrien Rabiot": "France", "Eduardo Camavinga": "France",
+        "Theo Hernandez": "France", "Jules Kounde": "France",
+        # Paraguay (knockout additions)
+        "Antonio Sanabria": "Paraguay", "Robert Morales": "Paraguay",
+        "Junior Alonso": "Paraguay", "Mathías Villasanti": "Paraguay",
         # Portugal
         "Bruno Fernandes": "Portugal",
         "Bernardo Silva": "Portugal",

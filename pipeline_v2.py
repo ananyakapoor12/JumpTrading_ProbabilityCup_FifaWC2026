@@ -640,6 +640,23 @@ def classify(question, home, away):
         thr = int(m2.group(1)) if m2 else 2
         return "any_player_brace", {"thr": thr}
 
+    # ── NEW: team scores in both halves ──────────────────────────────────────
+    # "Will France score in both halves..." — away team scoring in both halves
+    if "score in both halves" in q:
+        team_scores = h if h.lower() in q else a
+        is_home_scorer = team_scores == h
+        return "scores_both_halves", {"home": is_home_scorer}
+
+    # ── NEW: team holds a lead at any point ───────────────────────────────────
+    # "Will Paraguay hold a lead at any point in the match?"
+    # This is asking: does this team score first and lead at least briefly?
+    # ≈ P(team scores first) — since any team that scores first holds a lead
+    # (unless they concede before their first goal, which can't happen)
+    if "hold a lead at any point" in q or "lead at any point" in q:
+        team_leads = h if h.lower() in q else a
+        is_home = team_leads == h
+        return "holds_lead_any_point", {"home": is_home}
+
     # ── NEW: draw / tied at halftime ─────────────────────────────────────────
     if "tied at halftime" in q or "draw at halftime" in q or "level at halftime" in q:
         return "draw_ht", None
@@ -737,18 +754,21 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
 
     # ── NEW: total_shots_threshold ────────────────────────────────────────
     if key == "total_shots_threshold" and pd:
-        # Total shots (on + off target) = expected goals / shot_to_goal_rate
-        # WC shot-to-goal rate ≈ 0.10 (one goal per ~10 total attempts)
-        # This gives total shots lambda directly from goal lambda.
-        # Must use scipy.stats.poisson for numerical stability —
-        # our custom pois() overflows factorial for lambda > ~15.
-        shots_per_goal  = 10.0
-        lam_total_shots = (lam_h + lam_a) * shots_per_goal
+        # Total shots (on + off target):
+        # WC average: ~27 shots/match at avg 2.6 expected goals → ~10.4 shots/goal
+        # BUT: we anchor the total shots lambda to WC mean (27) scaled by
+        # how attacking this match is relative to average.
+        # This prevents the wild 95%/15% swings we got when using pure 10x multiplier.
+        WC_MEAN_SHOTS   = 27.0   # WC historical avg total shots per match
+        WC_MEAN_GOALS   = 2.60   # WC historical avg total expected goals
+        pace_factor     = (lam_h + lam_a) / WC_MEAN_GOALS
+        lam_total_shots = WC_MEAN_SHOTS * pace_factor
+        # Floor at 15 (most defensive possible) / cap at 45 (very open game)
+        lam_total_shots = max(15.0, min(45.0, lam_total_shots))
         try:
             from scipy.stats import poisson as sp_poisson
             return float(1 - sp_poisson.cdf(pd["thr"] - 1, lam_total_shots))
         except ImportError:
-            # Fallback: approximate with normal distribution (math already imported)
             z = (pd["thr"] - lam_total_shots) / math.sqrt(lam_total_shots)
             return float(1 - 0.5 * (1 + math.erf(z / math.sqrt(2))))
 
@@ -845,6 +865,25 @@ def resolve_prediction(key, pd, predictions, lambdas, lam_h, lam_a):
         # Concentration factor: higher dominance = more likely one player bags 2+
         concentration = 0.25 + (dominance - 0.5) * 0.30
         return p_enough_goals * concentration
+
+    # ── NEW: scores_both_halves ──────────────────────────────────────────────
+    if key == "scores_both_halves" and pd:
+        # Team scores in H1 AND H2 independently
+        # Use 45% / 55% split of full-time lambda
+        lam = lam_h if pd.get("home") else lam_a
+        p_h1 = 1 - math.exp(-lam * 0.45)
+        p_h2 = 1 - math.exp(-lam * 0.55)
+        return p_h1 * p_h2   # independent
+
+    # ── NEW: holds_lead_any_point ─────────────────────────────────────────────
+    # P(team holds lead at any point) ≈ P(team scores at least once)
+    # because: if they score first they instantly hold a lead, and
+    # even if they equalise later they held it. Only way they never hold
+    # a lead is if they score 0 goals or score only to tie (already behind).
+    # Approximation: P(team scores ≥1) — a slight overestimate for trailing teams
+    if key == "holds_lead_any_point" and pd:
+        lam = lam_h if pd.get("home") else lam_a
+        return 1 - math.exp(-lam)   # P(scores at least 1)
 
     # ── NEW: draw_ht ("tied at halftime") ────────────────────────────────────
     if key == "draw_ht":
