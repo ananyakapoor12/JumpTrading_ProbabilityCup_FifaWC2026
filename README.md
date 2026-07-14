@@ -361,9 +361,3 @@ Risk controls built into the model:
 - If markets already exist for you, use update-capable submit paths in the API client.
 
 ---
-
-If you want, this README can be extended next with:
-- a reproducible experiment section (fixed seed + exact sample match outputs),
-- a model diagnostics section (parameter tables, top scoreline charts),
-- and a changelog documenting each modeling revision.
-
